@@ -1,0 +1,283 @@
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <signal.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+#define SOCKETS_BUFFER_SIZE  1024
+#define SOCKETS_TIMEOUT      2
+
+
+struct scpi_instrument {
+	/* selection */
+	bool         serial;
+	bool         network;
+	char        *id_regex;
+	char        *model;
+	char        *response;
+
+	/* network based instrument */
+	char        *ip_address;
+	int    		 main_port;
+	int          main_socket;
+	int 	     control_port;
+	int          control_socket;
+
+	/* serial based instrument */
+	char         *tty_path;
+	int          ttyfd;
+	int          gpib_addr;
+};
+
+
+/*
+ * Network communications functions
+ */
+#if 0
+/* Wait for data to become available */
+static int network_waitfordata(int MySocket)
+{
+	fd_set MyFDSet;
+	struct timeval tv;
+	int retval;
+
+	/* Initialize fd_set structure */
+	FD_ZERO(&MyFDSet);
+
+	/* Add socket to "watch list" */
+	FD_SET(MySocket, &MyFDSet);
+
+	/* Set Timeout */
+	tv.tv_sec = SOCKETS_TIMEOUT;
+	tv.tv_usec = 0;
+
+	/* Wait for change */
+	retval = select(MySocket+1, &MyFDSet, NULL, NULL, &tv);
+
+	/* Interpret return value */
+	if(retval == -1) {
+		printf("Error: Problem with select (%i)...\n", errno);
+		perror(__func__);
+		exit(1);
+	}
+
+	/* 0 = timeout, 1 = socket status has changed */
+	return retval;
+}
+
+static int scpi_network_read(struct scpi_instrument *scpi)
+{
+	int actual;
+
+	/* Wait for data to become available */
+	if (network_waitfordata(scpi->control_socket) == 0) {
+		scpi->response[0] = 0;
+		return 0;
+	}
+
+	/* Read data */
+	actual = recv(scpi->control_socket, scpi->response, SOCKETS_BUFFER_SIZE, 0);
+	if (actual == -1) {
+		printf("Error: Unable to receive data (%i)...\n", errno);
+		perror(__func__);
+		exit(1);
+	} else {
+		scpi->response[actual]=0;
+	}
+
+	return actual;
+}
+#endif
+/* Turn NOdelay on */
+static void network_setnodelay(int MySocket)
+{
+	int StateNODELAY = 1;
+	int ret;
+
+	ret = setsockopt(MySocket, IPPROTO_TCP, TCP_NODELAY, (void *)&StateNODELAY, sizeof StateNODELAY);
+
+	if (ret == -1) {
+		printf("Error: Unable to set NODELAY option (%i)...\n", errno);
+		perror("sockets");
+		exit(1);
+	}
+	return;
+}
+
+static void *network_connect(void *arg)
+{
+//printf(__func__);
+puts("@@@@@@@@@@@@@@@@@@@@@@");
+	struct scpi_instrument *scpi;
+	struct sockaddr_in MyAddress, MyControlAddress;
+	int status;
+	struct timeval timeout;
+//	char buf[128];
+
+	timeout.tv_sec = SOCKETS_TIMEOUT;
+	timeout.tv_usec = 0;
+
+puts(">>>>>>>>>>>>>>>>>>>>>>");
+	/* Create socket (allocate resources) - IPv4, TCP */
+//	scpi->main_socket = socket(PF_INET, SOCK_STREAM, 0);
+	scpi->main_socket = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (scpi->main_socket == -1) {
+		printf("Error: Unable to create socket (%i)...\n", errno);
+	}
+
+puts("main_socket11111111111");
+
+	/* set Receive and Transmit Timeout, so connect doesn't take so long to fail */
+	status = setsockopt(scpi->main_socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+	if (status < 0)
+		perror("setsockopt failed\n");
+
+	status = setsockopt(scpi->main_socket, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout,sizeof(timeout));
+	if (status < 0)
+		perror("setsockopt failed\n");
+
+	/* Establish TCP connection */
+	scpi->main_port=6606;
+	scpi->ip_address="192.168.0.109";
+	memset(&MyAddress, 0, sizeof(struct sockaddr_in));
+//	MyAddress.sin_family = PF_INET;
+	MyAddress.sin_family = AF_INET;
+	MyAddress.sin_port = htons(scpi->main_port);
+	MyAddress.sin_addr.s_addr = inet_addr(scpi->ip_address);
+
+printf("scpi->main_port=%d\n", scpi->main_port);
+printf("scpi->ip_address=%s\n", scpi->ip_address);
+	status = connect(scpi->main_socket, (struct sockaddr *)&MyAddress, sizeof(struct sockaddr_in));
+	if(status == -1) {
+		printf("Error: Unable to establish connection to ip:%s (%i)...\n", scpi->ip_address, errno);
+	}
+
+	/* Minimize latency by setting TCP_NODELAY option */
+//	network_setnodelay(scpi->main_socket);
+
+#if 0
+	/* Ask for control port */
+	sprintf(buf, "SYST:COMM:TCPIP:CONTROL?\n");
+	status = send(scpi->main_socket, buf, strlen(buf), 0);
+	if (status == -1)
+		return -1;
+
+	if (scpi_network_read((scpi)) == 0) {
+		scpi->control_socket = scpi->main_socket;
+		return 0;
+	}
+
+	sscanf(scpi->response, "%d", &scpi->control_port);
+
+	/* Create socket for control port */
+	scpi->control_socket = socket(PF_INET, SOCK_STREAM, 0);
+	if(scpi->control_socket == -1) {
+		printf("Error: Unable to create control port socket (%i)...\n",errno);
+		return -1;
+	}
+
+	/* Establish TCP connection to control port */
+	memset(&MyControlAddress, 0, sizeof(struct sockaddr_in));
+	MyControlAddress.sin_family = PF_INET;
+	MyControlAddress.sin_port = htons(scpi->control_port);
+	MyControlAddress.sin_addr.s_addr = inet_addr(scpi->ip_address);
+
+	status = connect(scpi->control_socket, (struct sockaddr *) &MyControlAddress, sizeof(struct sockaddr_in));
+	if(status == -1) {
+		printf("Error: Unable to establish connection to control port (%i)...\n", errno);
+		return -1;
+	}
+#endif
+#define FILE_MAX_LEN 64
+
+	int total, len;
+	char filename[FILE_MAX_LEN+1], buf[1024];
+	FILE *fp;
+
+	/* 接收文件名 */
+	total = 0;
+	while (total < FILE_MAX_LEN)
+	{
+		len = recv(scpi->control_socket, filename+total, (FILE_MAX_LEN-total), 0);
+		if(len == -1)
+		{
+			break;
+		}
+		total += len;
+	}
+
+	/* 接收文件名出错 */
+	if(total != FILE_MAX_LEN)
+	{
+		perror("failure file name");
+	}
+
+	printf("recv file %s ...\n", filename);
+	
+	fp = fopen(filename, "wb");
+	if(NULL == fp)
+	{
+		perror("open");
+	}
+
+	/* 接收文件数据 */
+	printf("\nRec File Begin!\n");
+	total = 0;
+	while(1)
+	{
+		len = recv(scpi->control_socket, buf, sizeof(buf), 0);
+		if(-1 == len)
+		{
+			break;
+		}
+		total += len;
+
+		//写入本地文件
+		fwrite(buf, 1, len, fp);
+	}
+
+	fclose(fp);
+	printf("Recv file %s success! Total length:%d  \n", filename, total);
+}
+
+
+/* simple configuration and streaming */
+int main(int argc, char **argv)
+{
+//	pthread_t tid[2];
+	pthread_t tid;
+	char buf[7500];
+	FILE *fpr, *fpw;
+	void *p=malloc(7500);
+puts("11111111111111111");
+#if 0
+	fpr=fopen("data1.txt", "rb");
+	fpw=fopen("dt1.txt", "wb");
+	fread(buf, 1, sizeof(buf), fpr);
+	fwrite(buf, 1, sizeof(buf), fpw);
+#endif
+//	pthread_create(&tid, NULL, (void *)network_connect, (void *)buf);
+printf(__func__);
+	pthread_create(&tid, NULL, network_connect, NULL);
+puts("2222222222");
+
+//	fclose(fpr);
+//	fclose(fpw);
+
+	return 0;
+} 
+

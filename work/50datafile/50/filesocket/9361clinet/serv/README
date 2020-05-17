@@ -1,0 +1,2 @@
+./fileserver ../data1.txt
+./fileclient
